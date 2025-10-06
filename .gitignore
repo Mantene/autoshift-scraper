@@ -134,3 +134,13 @@ notebooks/
 data
 *new.json
 *old.json
+
+# Ignore data folder
+/data
+data*
+
+# Ignore temp workspace folder
+tmp/
+
+# Ignore generated agents manifest
+AGENTS.md

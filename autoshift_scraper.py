@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import json, base64
 import re
+import html
 from datetime import datetime, timezone, timedelta
 from os import path, makedirs
 from pathlib import Path
@@ -97,6 +98,43 @@ webpages = [
         "platform_ordered_tables": ["universal", "universal", "universal"],
     },
 ]
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_CONTROL_CHAR_RE = re.compile(r"[\u0000-\u001F\u007F]")
+_SANITIZED_FIELDS = (
+    "code",
+    "type",
+    "game",
+    "platform",
+    "reward",
+    "archived",
+    "expires",
+    "link",
+)
+
+
+def _sanitize_text_field(value):
+    # DEV NOTE: Keep output canonical by removing markup/entities so dedupe logic and JSON writes share the same text.
+    if not isinstance(value, str):
+        return value
+
+    # Remove HTML tags then decode HTML entities so characters like &amp; collapse to '&'.
+    text = _HTML_TAG_RE.sub("", value)
+    text = html.unescape(text)
+    # Normalise whitespace and strip stray control characters that slip through.
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[\t\r\n]+", " ", text)
+    text = _CONTROL_CHAR_RE.sub("", text)
+    return text.strip()
+
+
+def _sanitize_autoshift_entry(entry):
+    sanitized = dict(entry)
+    for field in _SANITIZED_FIELDS:
+        if field in sanitized:
+            sanitized[field] = _sanitize_text_field(sanitized[field])
+    return sanitized
 
 
 def remap_dict_keys(dict_keys):
@@ -194,38 +232,43 @@ def scrape_codes(webpage):
     #    /html/body/div[2]/div/div[4]/div[1]/div/div/article/div[5]/figure[2]/table/
     figures = soup.find_all("figure")
 
-    _L.info(" Expecting tables: " + str(len(webpage.get("platform_ordered_tables"))))
-    _L.info(" Collected tables: " + str(len(figures)))
+    table_html_blocks = []
+    for figure in figures:
+        table_html = figure.find(lambda tag: tag.name == "table")
+        if table_html is None:
+            # DEV NOTE: MentalMars BL4 embeds decorative figures (e.g. header images) — ignore them so counting stays stable.
+            _L.debug(" Figure had no <table>; skipping figure")
+            continue
+        table_html_blocks.append(table_html)
+
+    platforms = webpage.get("platform_ordered_tables")
+    _L.info(" Expecting tables: " + str(len(platforms)))
+    _L.info(
+        " Collected tables: "
+        + str(len(table_html_blocks))
+        + (" (from " + str(len(figures)) + " <figure> blocks)" if DEBUG else "")
+    )
 
     # headers = []
     code_tables = []
 
     table_count = 0
-    for figure in figures:
-        # Prevent IndexError if there are more figures than expected
-        if table_count >= len(webpage.get("platform_ordered_tables")):
+    for table_html in table_html_blocks:
+        # Prevent IndexError if there are more tables than expected
+        if table_count >= len(platforms):
             _L.warning(
-                f"More tables found ({len(figures)}) than expected ({len(webpage.get('platform_ordered_tables'))}) for {webpage.get('game')}. Skipping extra tables."
+                f"More tables found ({len(table_html_blocks)}) than expected ({len(platforms)}) for {webpage.get('game')}. Skipping extra tables."
             )
             break
 
+        platform = platforms[table_count]
         _L.info(
-            " Parsing for table #"
-            + str(table_count)
-            + " - "
-            + webpage.get("platform_ordered_tables")[table_count]
+            " Parsing for table #" + str(table_count) + " - " + platform
         )
 
         # Don't parse any tables marked to discard
-        if webpage.get("platform_ordered_tables")[table_count] == "discard":
+        if platform == "discard":
             table_count += 1
-            continue
-        
-        # CHANGE: Some <figure> blocks may not contain a table; skip them to avoid AttributeError.
-        # NOTE: We do NOT increment table_count here so platform mapping stays aligned to tables.   
-        table_html = figure.find(lambda tag: tag.name == "table")
-        if table_html is None:
-            _L.debug(" Figure had no <table>; skipping figure")
             continue
 
         table_header = []
@@ -345,6 +388,13 @@ def generateAutoshiftJSON(website_code_tables, previous_codes, include_expired):
                     # skip rows that do not contain a valid code
                     continue
 
+                # DEV NOTE: Normalise the parsed code and related strings in-place so repeated runs reuse identical values.
+                code["code"] = raw_code
+                if "reward" in code:
+                    code["reward"] = _sanitize_text_field(code.get("reward"))
+                if "expires" in code:
+                    code["expires"] = _sanitize_text_field(code.get("expires"))
+
                 # Skip the code if its expired and we're not to include expired
                 if not include_expired and code.get("expired"):
                     continue
@@ -405,44 +455,50 @@ def generateAutoshiftJSON(website_code_tables, previous_codes, include_expired):
 
                 if code_table.get("platform") == "pc":
                     autoshiftcodes.append(
-                        {
-                            "code": code.get("code"),
-                            "type": "shift",
-                            "game": code_table.get("game"),
-                            "platform": "steam",
-                            "reward": code.get("reward"),
-                            "archived": archived,
-                            "expires": code.get("expires"),
-                            "expired": code.get("expired"),
-                            "link": code_table.get("sourceURL"),
-                        }
+                        _sanitize_autoshift_entry(
+                            {
+                                "code": code.get("code"),
+                                "type": "shift",
+                                "game": code_table.get("game"),
+                                "platform": "steam",
+                                "reward": code.get("reward"),
+                                "archived": archived,
+                                "expires": code.get("expires"),
+                                "expired": code.get("expired"),
+                                "link": code_table.get("sourceURL"),
+                            }
+                        )
                     )
                     autoshiftcodes.append(
-                        {
-                            "code": code.get("code"),
-                            "type": "shift",
-                            "game": code_table.get("game"),
-                            "platform": "epic",
-                            "reward": code.get("reward"),
-                            "archived": archived,
-                            "expires": code.get("expires"),
-                            "expired": code.get("expired"),
-                            "link": code_table.get("sourceURL"),
-                        }
+                        _sanitize_autoshift_entry(
+                            {
+                                "code": code.get("code"),
+                                "type": "shift",
+                                "game": code_table.get("game"),
+                                "platform": "epic",
+                                "reward": code.get("reward"),
+                                "archived": archived,
+                                "expires": code.get("expires"),
+                                "expired": code.get("expired"),
+                                "link": code_table.get("sourceURL"),
+                            }
+                        )
                     )
                 else:
                     autoshiftcodes.append(
-                        {
-                            "code": code.get("code"),
-                            "type": "shift",
-                            "game": code_table.get("game"),
-                            "platform": code_table.get("platform"),
-                            "reward": code.get("reward"),
-                            "archived": archived,
-                            "expires": code.get("expires"),
-                            "expired": code.get("expired"),
-                            "link": code_table.get("sourceURL"),
-                        }
+                        _sanitize_autoshift_entry(
+                            {
+                                "code": code.get("code"),
+                                "type": "shift",
+                                "game": code_table.get("game"),
+                                "platform": code_table.get("platform"),
+                                "reward": code.get("reward"),
+                                "archived": archived,
+                                "expires": code.get("expires"),
+                                "expired": code.get("expired"),
+                                "link": code_table.get("sourceURL"),
+                            }
+                        )
                     )
 
     # Add the metadata section (machine- and human-friendly stamps)
