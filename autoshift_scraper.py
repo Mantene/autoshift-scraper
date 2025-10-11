@@ -33,7 +33,11 @@ webpages = [
     {
         "game": "Borderlands 4",
         "sourceURL": "https://mentalmars.com/game-news/borderlands-4-shift-codes/",
-        "platform_ordered_tables": ["universal", "discard"],
+        "platform_ordered_tables": [
+            "universal",  # Golden key rotation
+            "universal",  # Cosmetic reward codes
+            "universal",  # Permanent codes
+        ],
     },
     {
         "game": "Borderlands: Game of the Year Edition",
@@ -254,9 +258,15 @@ def scrape_codes(webpage):
     code_tables = []
 
     table_count = 0
+    discard_fallback = bool(platforms) and platforms[-1] == "discard"
     for table_html in table_html_blocks:
         # Prevent IndexError if there are more tables than expected
         if table_count >= len(platforms):
+            if discard_fallback:
+                _L.debug(
+                    " Extra table beyond configured mapping; treating as discard."
+                )
+                continue
             _L.warning(
                 f"More tables found ({len(table_html_blocks)}) than expected ({len(platforms)}) for {webpage.get('game')}. Skipping extra tables."
             )
